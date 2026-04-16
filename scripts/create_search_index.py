@@ -39,7 +39,7 @@ def main():
 
     # Check if index already exists
     index_client = get_index_client()
-    existing = [idx.name for idx in index_client.list_index_names()]
+    existing = list(index_client.list_index_names())
 
     if settings.azure_search_index_name in existing:
         print(f"✅ Index '{settings.azure_search_index_name}' already exists. Nothing to do.")

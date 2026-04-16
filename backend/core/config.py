@@ -43,7 +43,11 @@ class Settings(BaseSettings):
 
     # ── Azure Content Understanding ───────────────────────────
     azure_cu_endpoint: str = ""
-    azure_cu_analyzer_id: str = "doc-review-analyzer"
+    azure_cu_analyzer_id: str = "docreviewanalyzer"
+    azure_cu_llm_deployment: str = ""
+    azure_cu_embedding_deployment: str = ""
+    azure_cu_llm_model: str = "gpt-4.1"
+    azure_cu_embedding_model: str = "text-embedding-3-large"
     azure_cu_api_key: str = ""              # Optional: leave blank for keyless
 
     # ── App ───────────────────────────────────────────────────

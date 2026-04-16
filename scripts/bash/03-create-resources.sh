@@ -6,7 +6,7 @@ set -euo pipefail
 # - Storage Account + Blob container
 # - Azure AI Search service
 # - Azure OpenAI account + model deployment
-# - Azure AI Services account (used for Content Understanding endpoint/key)
+# - Azure AI Services account + Foundry project + CU model deployments
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/00-variables.sh"
@@ -34,15 +34,39 @@ else
     --output table
 fi
 
-# Create Blob container.
-STORAGE_KEY="$(az storage account keys list --resource-group "${AZ_RESOURCE_GROUP}" --account-name "${AZ_STORAGE_ACCOUNT_NAME}" --query "[0].value" -o tsv)"
+# Grant the current signed-in user Blob data-plane rights so the local app can upload with DefaultAzureCredential.
+CURRENT_USER_OBJECT_ID="$(az ad signed-in-user show --query id -o tsv)"
+STORAGE_ACCOUNT_SCOPE="$(az storage account show --name "${AZ_STORAGE_ACCOUNT_NAME}" --resource-group "${AZ_RESOURCE_GROUP}" --query id -o tsv)"
+HAS_BLOB_OWNER_ROLE="$(az role assignment list --assignee-object-id "${CURRENT_USER_OBJECT_ID}" --scope "${STORAGE_ACCOUNT_SCOPE}" --query "[?roleDefinitionName=='Storage Blob Data Owner'] | length(@)" -o tsv)"
+
+if [[ "${HAS_BLOB_OWNER_ROLE}" == "0" ]]; then
+  echo "Assigning 'Storage Blob Data Owner' to the signed-in user on ${AZ_STORAGE_ACCOUNT_NAME}"
+  az role assignment create \
+    --assignee-object-id "${CURRENT_USER_OBJECT_ID}" \
+    --assignee-principal-type User \
+    --role "Storage Blob Data Owner" \
+    --scope "${STORAGE_ACCOUNT_SCOPE}" \
+    --output none
+else
+  echo "Signed-in user already has 'Storage Blob Data Owner' on ${AZ_STORAGE_ACCOUNT_NAME}"
+fi
+
+# Create Blob container using Entra auth (works when shared keys are disabled by policy).
+set +e
 az storage container create \
   --name "${AZ_STORAGE_CONTAINER_NAME}" \
   --account-name "${AZ_STORAGE_ACCOUNT_NAME}" \
-  --account-key "${STORAGE_KEY}" \
+  --auth-mode login \
   --output table >/dev/null
+CONTAINER_EXIT_CODE=$?
+set -e
 
-echo "Blob container ensured: ${AZ_STORAGE_CONTAINER_NAME}"
+if [[ ${CONTAINER_EXIT_CODE} -ne 0 ]]; then
+  echo "WARNING: Could not create container with login auth."
+  echo "Ensure your identity has 'Storage Blob Data Owner' on the storage account, then rerun step 03."
+else
+  echo "Blob container ensured: ${AZ_STORAGE_CONTAINER_NAME}"
+fi
 
 # Create Azure AI Search service if missing.
 if az search service show --name "${AZ_SEARCH_SERVICE_NAME}" --resource-group "${AZ_RESOURCE_GROUP}" >/dev/null 2>&1; then
@@ -82,10 +106,26 @@ else
   az cognitiveservices account create \
     --name "${AZ_AISERVICES_ACCOUNT_NAME}" \
     --resource-group "${AZ_RESOURCE_GROUP}" \
-    --location "${AZ_LOCATION}" \
+    --location "${AZ_OPENAI_LOCATION}" \
     --kind AIServices \
     --sku S0 \
+    --custom-domain "${AZ_AISERVICES_ACCOUNT_NAME}" \
+    --allow-project-management true \
     --yes \
+    --output table
+fi
+
+# Create Azure AI Foundry project under the AIServices account (idempotent).
+PROJECT_RESOURCE_ID="/subscriptions/$(az account show --query id -o tsv)/resourceGroups/${AZ_RESOURCE_GROUP}/providers/Microsoft.CognitiveServices/accounts/${AZ_AISERVICES_ACCOUNT_NAME}/projects/${AZ_FOUNDRY_PROJECT_NAME}"
+
+if az resource show --ids "${PROJECT_RESOURCE_ID}" --api-version "${AZ_FOUNDRY_PROJECT_API_VERSION}" >/dev/null 2>&1; then
+  echo "Foundry project already exists: ${AZ_FOUNDRY_PROJECT_NAME}"
+else
+  echo "Creating Foundry project: ${AZ_FOUNDRY_PROJECT_NAME}"
+  az rest \
+    --method put \
+    --url "https://management.azure.com${PROJECT_RESOURCE_ID}?api-version=${AZ_FOUNDRY_PROJECT_API_VERSION}" \
+    --body '{"location":"'"${AZ_OPENAI_LOCATION}"'","kind":"AIServices","identity":{"type":"SystemAssigned"}}' \
     --output table
 fi
 
@@ -117,5 +157,70 @@ else
     echo "Update model/version/region in 00-variables.sh and retry this step."
   fi
 fi
+
+create_account_deployment() {
+  local account_name="$1"
+  local deployment_name="$2"
+  local model_name="$3"
+  local model_version="$4"
+  local sku_name="$5"
+  local sku_capacity="$6"
+  local deployment_label="$7"
+
+  if az cognitiveservices account deployment show \
+    --name "${account_name}" \
+    --resource-group "${AZ_RESOURCE_GROUP}" \
+    --deployment-name "${deployment_name}" >/dev/null 2>&1; then
+    echo "${deployment_label} already exists: ${deployment_name}"
+    return
+  fi
+
+  echo "Creating ${deployment_label}: ${deployment_name}"
+  set +e
+  az cognitiveservices account deployment create \
+    --name "${account_name}" \
+    --resource-group "${AZ_RESOURCE_GROUP}" \
+    --deployment-name "${deployment_name}" \
+    --model-name "${model_name}" \
+    --model-version "${model_version}" \
+    --model-format OpenAI \
+    --sku-name "${sku_name}" \
+    --sku-capacity "${sku_capacity}" \
+    --output table
+  local deploy_exit_code=$?
+  set -e
+
+  if [[ ${deploy_exit_code} -ne 0 ]]; then
+    echo "WARNING: ${deployment_label} creation failed."
+    echo "Update the model/version/sku variables in 00-variables.sh and rerun step 03."
+  fi
+}
+
+create_account_deployment \
+  "${AZ_AISERVICES_ACCOUNT_NAME}" \
+  "${AZ_OPENAI_DEPLOYMENT_NAME}" \
+  "${AZ_OPENAI_MODEL_NAME}" \
+  "${AZ_OPENAI_MODEL_VERSION}" \
+  "${AZ_OPENAI_DEPLOYMENT_SKU_NAME}" \
+  "${AZ_OPENAI_DEPLOYMENT_SKU_CAPACITY}" \
+  "GPT deployment on AI Services"
+
+create_account_deployment \
+  "${AZ_AISERVICES_ACCOUNT_NAME}" \
+  "${AZ_CU_LLM_DEPLOYMENT_NAME}" \
+  "${AZ_CU_LLM_MODEL_NAME}" \
+  "${AZ_CU_LLM_MODEL_VERSION}" \
+  "${AZ_CU_LLM_DEPLOYMENT_SKU_NAME}" \
+  "${AZ_CU_LLM_DEPLOYMENT_SKU_CAPACITY}" \
+  "Content Understanding LLM deployment"
+
+create_account_deployment \
+  "${AZ_AISERVICES_ACCOUNT_NAME}" \
+  "${AZ_CU_EMBEDDING_DEPLOYMENT_NAME}" \
+  "${AZ_CU_EMBEDDING_MODEL_NAME}" \
+  "${AZ_CU_EMBEDDING_MODEL_VERSION}" \
+  "${AZ_CU_EMBEDDING_DEPLOYMENT_SKU_NAME}" \
+  "${AZ_CU_EMBEDDING_DEPLOYMENT_SKU_CAPACITY}" \
+  "Content Understanding embedding deployment"
 
 echo "Step 03 complete."

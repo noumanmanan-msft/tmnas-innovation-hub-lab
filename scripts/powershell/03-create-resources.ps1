@@ -5,7 +5,7 @@ $ErrorActionPreference = "Stop"
 # - Storage Account + Blob container
 # - Azure AI Search service
 # - Azure OpenAI account + model deployment
-# - Azure AI Services account (used for Content Understanding endpoint/key)
+# - Azure AI Services account + Foundry project + CU model deployments
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 . "$scriptDir/00-variables.ps1"
@@ -33,15 +33,37 @@ catch {
         --output table
 }
 
-# Create Blob container.
-$storageKey = az storage account keys list --resource-group $env:AZ_RESOURCE_GROUP --account-name $env:AZ_STORAGE_ACCOUNT_NAME --query "[0].value" -o tsv
-az storage container create `
-    --name $env:AZ_STORAGE_CONTAINER_NAME `
-    --account-name $env:AZ_STORAGE_ACCOUNT_NAME `
-    --account-key $storageKey `
-    --output table | Out-Null
+# Grant the current signed-in user Blob data-plane rights so the local app can upload with DefaultAzureCredential.
+$currentUserObjectId = az ad signed-in-user show --query id -o tsv
+$storageAccountScope = az storage account show --name $env:AZ_STORAGE_ACCOUNT_NAME --resource-group $env:AZ_RESOURCE_GROUP --query id -o tsv
+$hasBlobOwnerRole = az role assignment list --assignee-object-id $currentUserObjectId --scope $storageAccountScope --query "[?roleDefinitionName=='Storage Blob Data Owner'] | length(@)" -o tsv
 
-Write-Host "Blob container ensured: $($env:AZ_STORAGE_CONTAINER_NAME)"
+if ($hasBlobOwnerRole -eq "0") {
+    Write-Host "Assigning 'Storage Blob Data Owner' to the signed-in user on $($env:AZ_STORAGE_ACCOUNT_NAME)"
+    az role assignment create `
+        --assignee-object-id $currentUserObjectId `
+        --assignee-principal-type User `
+        --role "Storage Blob Data Owner" `
+        --scope $storageAccountScope `
+        --output none
+}
+else {
+    Write-Host "Signed-in user already has 'Storage Blob Data Owner' on $($env:AZ_STORAGE_ACCOUNT_NAME)"
+}
+
+# Create Blob container using Entra auth.
+try {
+    az storage container create `
+        --name $env:AZ_STORAGE_CONTAINER_NAME `
+        --account-name $env:AZ_STORAGE_ACCOUNT_NAME `
+        --auth-mode login `
+        --output table | Out-Null
+
+    Write-Host "Blob container ensured: $($env:AZ_STORAGE_CONTAINER_NAME)"
+}
+catch {
+    Write-Warning "Could not create container with login auth. Ensure your identity has 'Storage Blob Data Owner' on the storage account, then rerun step 03."
+}
 
 # Create Azure AI Search service if missing.
 try {
@@ -87,10 +109,29 @@ catch {
     az cognitiveservices account create `
         --name $env:AZ_AISERVICES_ACCOUNT_NAME `
         --resource-group $env:AZ_RESOURCE_GROUP `
-        --location $env:AZ_LOCATION `
+        --location $env:AZ_OPENAI_LOCATION `
         --kind AIServices `
         --sku S0 `
+        --custom-domain $env:AZ_AISERVICES_ACCOUNT_NAME `
+        --allow-project-management true `
         --yes `
+        --output table
+}
+
+# Create Azure AI Foundry project under the AIServices account (idempotent).
+$subscriptionId = az account show --query id -o tsv
+$projectResourceId = "/subscriptions/$subscriptionId/resourceGroups/$($env:AZ_RESOURCE_GROUP)/providers/Microsoft.CognitiveServices/accounts/$($env:AZ_AISERVICES_ACCOUNT_NAME)/projects/$($env:AZ_FOUNDRY_PROJECT_NAME)"
+
+try {
+    az resource show --ids $projectResourceId --api-version $env:AZ_FOUNDRY_PROJECT_API_VERSION | Out-Null
+    Write-Host "Foundry project already exists: $($env:AZ_FOUNDRY_PROJECT_NAME)"
+}
+catch {
+    Write-Host "Creating Foundry project: $($env:AZ_FOUNDRY_PROJECT_NAME)"
+    az rest `
+        --method put `
+        --url "https://management.azure.com$projectResourceId?api-version=$($env:AZ_FOUNDRY_PROJECT_API_VERSION)" `
+        --body "{\"location\":\"$($env:AZ_OPENAI_LOCATION)\",\"kind\":\"AIServices\",\"identity\":{\"type\":\"SystemAssigned\"}}" `
         --output table
 }
 
@@ -129,5 +170,78 @@ else {
         Write-Warning "Update model/version/region in 00-variables.ps1 and retry this step."
     }
 }
+
+function Ensure-AccountDeployment {
+    param(
+        [string]$AccountName,
+        [string]$DeploymentName,
+        [string]$ModelName,
+        [string]$ModelVersion,
+        [string]$SkuName,
+        [string]$SkuCapacity,
+        [string]$DeploymentLabel
+    )
+
+    $exists = $false
+    try {
+        az cognitiveservices account deployment show `
+            --name $AccountName `
+            --resource-group $env:AZ_RESOURCE_GROUP `
+            --deployment-name $DeploymentName | Out-Null
+        $exists = $true
+    }
+    catch {
+        $exists = $false
+    }
+
+    if ($exists) {
+        Write-Host "$DeploymentLabel already exists: $DeploymentName"
+        return
+    }
+
+    Write-Host "Creating $DeploymentLabel: $DeploymentName"
+    try {
+        az cognitiveservices account deployment create `
+            --name $AccountName `
+            --resource-group $env:AZ_RESOURCE_GROUP `
+            --deployment-name $DeploymentName `
+            --model-name $ModelName `
+            --model-version $ModelVersion `
+            --model-format OpenAI `
+            --sku-name $SkuName `
+            --sku-capacity $SkuCapacity `
+            --output table
+    }
+    catch {
+        Write-Warning "$DeploymentLabel creation failed. Update the model/version/sku values in 00-variables.ps1 and rerun step 03."
+    }
+}
+
+Ensure-AccountDeployment `
+    -AccountName $env:AZ_AISERVICES_ACCOUNT_NAME `
+    -DeploymentName $env:AZ_OPENAI_DEPLOYMENT_NAME `
+    -ModelName $env:AZ_OPENAI_MODEL_NAME `
+    -ModelVersion $env:AZ_OPENAI_MODEL_VERSION `
+    -SkuName $env:AZ_OPENAI_DEPLOYMENT_SKU_NAME `
+    -SkuCapacity $env:AZ_OPENAI_DEPLOYMENT_SKU_CAPACITY `
+    -DeploymentLabel "GPT deployment on AI Services"
+
+Ensure-AccountDeployment `
+    -AccountName $env:AZ_AISERVICES_ACCOUNT_NAME `
+    -DeploymentName $env:AZ_CU_LLM_DEPLOYMENT_NAME `
+    -ModelName $env:AZ_CU_LLM_MODEL_NAME `
+    -ModelVersion $env:AZ_CU_LLM_MODEL_VERSION `
+    -SkuName $env:AZ_CU_LLM_DEPLOYMENT_SKU_NAME `
+    -SkuCapacity $env:AZ_CU_LLM_DEPLOYMENT_SKU_CAPACITY `
+    -DeploymentLabel "Content Understanding LLM deployment"
+
+Ensure-AccountDeployment `
+    -AccountName $env:AZ_AISERVICES_ACCOUNT_NAME `
+    -DeploymentName $env:AZ_CU_EMBEDDING_DEPLOYMENT_NAME `
+    -ModelName $env:AZ_CU_EMBEDDING_MODEL_NAME `
+    -ModelVersion $env:AZ_CU_EMBEDDING_MODEL_VERSION `
+    -SkuName $env:AZ_CU_EMBEDDING_DEPLOYMENT_SKU_NAME `
+    -SkuCapacity $env:AZ_CU_EMBEDDING_DEPLOYMENT_SKU_CAPACITY `
+    -DeploymentLabel "Content Understanding embedding deployment"
 
 Write-Host "Step 03 complete."

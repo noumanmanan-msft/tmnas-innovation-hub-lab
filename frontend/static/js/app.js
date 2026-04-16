@@ -183,12 +183,20 @@ async function doAnalyze() {
 
 function renderAnalysisResult(data, container) {
   const fields = data.fields || [];
+
+  const prettyFieldName = (name) => (
+    String(name || '')
+      .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+      .replace(/_/g, ' ')
+      .trim()
+  );
+
   const fieldHtml = fields.length
     ? fields.map(f => `
-        <div class="field-row">
-          <span class="field-name">${escHtml(f.name)}</span>
-          <span class="field-value">${escHtml(String(f.value ?? '—'))}</span>
-          ${f.confidence != null ? `<span class="field-confidence">${(f.confidence * 100).toFixed(0)}%</span>` : ''}
+        <div class="grid grid-cols-[160px_minmax(0,1fr)_56px] items-start gap-3 py-2.5 border-b border-gray-50 last:border-0">
+          <span class="text-xs font-semibold text-azure-600 uppercase tracking-wide leading-5">${escHtml(prettyFieldName(f.name))}</span>
+          <span class="text-sm text-gray-800 leading-5 break-words">${escHtml(String(f.value ?? '—'))}</span>
+          ${f.confidence != null ? `<span class="text-xs text-gray-500 text-right tabular-nums leading-5">${(f.confidence * 100).toFixed(0)}%</span>` : '<span></span>'}
         </div>`).join('')
     : '<p class="text-sm text-gray-400 py-4">No structured fields extracted. Check your Content Understanding analyzer configuration.</p>';
 

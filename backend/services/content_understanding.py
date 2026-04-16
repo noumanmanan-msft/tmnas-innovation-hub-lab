@@ -16,12 +16,17 @@ Docs: https://learn.microsoft.com/azure/ai-services/content-understanding/
 
 from __future__ import annotations
 
+import base64
+import mimetypes
 import time
 import httpx
 
 from backend.core.config import get_settings
 from backend.core.auth import get_credential, get_cu_api_key
 from backend.models.schemas import ExtractedField
+
+
+CU_API_VERSION = "2025-11-01"
 
 
 # ── Internal helpers ──────────────────────────────────────────
@@ -58,20 +63,26 @@ async def analyze_document(doc_id: str, file_bytes: bytes, filename: str) -> dic
     """
     settings = get_settings()
     headers = _get_headers()
+    base_endpoint = settings.azure_cu_endpoint.rstrip("/")
 
     # ── Step 1: Submit the document for analysis ──────────────
-    import base64
     encoded = base64.b64encode(file_bytes).decode("utf-8")
+    mime_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
 
     submit_url = (
-        f"{settings.azure_cu_endpoint}/contentunderstanding/analyzers"
+        f"{base_endpoint}/contentunderstanding/analyzers"
         f"/{settings.azure_cu_analyzer_id}:analyze"
-        f"?api-version=2024-12-01-preview"
+        f"?api-version={CU_API_VERSION}"
     )
 
     payload = {
-        "url": None,
-        "base64Source": encoded,
+        "inputs": [
+            {
+                "name": filename,
+                "data": encoded,
+                "mimeType": mime_type,
+            }
+        ],
     }
 
     async with httpx.AsyncClient(timeout=60) as client:
@@ -127,45 +138,96 @@ def _parse_result(result: dict) -> dict:
     Parse the Content Understanding response into our internal format.
     Handles both the direct result shape and the operation result shape.
     """
-    # Navigate to the analyzer result
-    analyze_result = (
-        result.get("result", result)
-              .get("analyzeResult", result.get("analyzeResult", {}))
-    )
+    operation_result = result.get("result", result)
 
     fields: list[ExtractedField] = []
-    raw_content = ""
+    contents = operation_result.get("contents", [])
 
-    # ── Extract structured fields ─────────────────────────────
-    documents = analyze_result.get("documents", [])
-    for doc in documents:
-        for field_name, field_data in doc.get("fields", {}).items():
-            fields.append(
-                ExtractedField(
-                    name=field_name,
-                    value=field_data.get("valueString")
-                          or field_data.get("content")
-                          or field_data.get("value"),
-                    confidence=field_data.get("confidence"),
+    if contents:
+        for content in contents:
+            for field_name, field_data in content.get("fields", {}).items():
+                fields.append(
+                    ExtractedField(
+                        name=field_name,
+                        value=_field_value(field_data),
+                        confidence=field_data.get("confidence"),
+                    )
                 )
-            )
 
-    # ── Extract raw text content ──────────────────────────────
-    pages = analyze_result.get("pages", [])
-    page_texts = []
-    for page in pages:
-        page_lines = [line.get("content", "") for line in page.get("lines", [])]
-        page_texts.append("\n".join(page_lines))
-    raw_content = "\n\n".join(page_texts)
+        raw_content = "\n\n".join(
+            content.get("markdown", "") for content in contents if content.get("markdown")
+        )
 
-    # Fallback: top-level content field
-    if not raw_content:
-        raw_content = analyze_result.get("content", "")
+        if not raw_content:
+            paragraphs = []
+            for content in contents:
+                paragraphs.extend(
+                    paragraph.get("content", "")
+                    for paragraph in content.get("paragraphs", [])
+                    if paragraph.get("content")
+                )
+            raw_content = "\n\n".join(paragraphs)
+    else:
+        # Legacy fallback for older response shapes.
+        analyze_result = operation_result.get(
+            "analyzeResult",
+            result.get("analyzeResult", {}),
+        )
+        documents = analyze_result.get("documents", [])
+        for doc in documents:
+            for field_name, field_data in doc.get("fields", {}).items():
+                fields.append(
+                    ExtractedField(
+                        name=field_name,
+                        value=_field_value(field_data),
+                        confidence=field_data.get("confidence"),
+                    )
+                )
+
+        pages = analyze_result.get("pages", [])
+        page_texts = []
+        for page in pages:
+            page_lines = [line.get("content", "") for line in page.get("lines", [])]
+            page_texts.append("\n".join(page_lines))
+        raw_content = "\n\n".join(page_texts) or analyze_result.get("content", "")
 
     return {
         "fields": fields,
         "raw_content": raw_content,
     }
+
+
+def _field_value(field_data: dict) -> object:
+    field_type = field_data.get("type")
+
+    if field_type == "string":
+        return field_data.get("valueString") or field_data.get("content")
+    if field_type == "date":
+        return field_data.get("valueDate")
+    if field_type == "time":
+        return field_data.get("valueTime")
+    if field_type == "number":
+        return field_data.get("valueNumber")
+    if field_type == "integer":
+        return field_data.get("valueInteger")
+    if field_type == "boolean":
+        return field_data.get("valueBoolean")
+    if field_type == "json":
+        return field_data.get("valueJson")
+    if field_type == "array":
+        return [_field_value(item) for item in field_data.get("valueArray", [])]
+    if field_type == "object":
+        return {
+            key: _field_value(value)
+            for key, value in field_data.get("valueObject", {}).items()
+        }
+
+    return (
+        field_data.get("valueString")
+        or field_data.get("content")
+        or field_data.get("value")
+        or field_data.get("valueJson")
+    )
 
 
 async def _async_sleep(seconds: float) -> None:

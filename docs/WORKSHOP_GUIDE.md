@@ -56,7 +56,7 @@ Expected output: `✅ Index 'doc-review-index' created successfully!`
 python scripts/create_cu_analyzer.py
 ```
 
-Expected output: `✅ Analyzer 'doc-review-analyzer' created successfully!`
+Expected output: `✅ Analyzer 'docreviewanalyzer' created successfully!`
 
 > ⚠️ If CU is not available, skip this step. The /analyze endpoint will fail gracefully; you can still demo /chat with raw text.
 

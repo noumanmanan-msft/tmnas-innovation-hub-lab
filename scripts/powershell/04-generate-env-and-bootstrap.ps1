@@ -10,15 +10,46 @@ $repoRoot = Resolve-Path (Join-Path $scriptDir "../..")
 $subscriptionId = az account show --query id -o tsv
 
 $openaiEndpoint = az cognitiveservices account show --name $env:AZ_OPENAI_ACCOUNT_NAME --resource-group $env:AZ_RESOURCE_GROUP --query properties.endpoint -o tsv
-$openaiKey = az cognitiveservices account keys list --name $env:AZ_OPENAI_ACCOUNT_NAME --resource-group $env:AZ_RESOURCE_GROUP --query key1 -o tsv
+$openaiKey = ""
+try {
+    $openaiKey = az cognitiveservices account keys list --name $env:AZ_OPENAI_ACCOUNT_NAME --resource-group $env:AZ_RESOURCE_GROUP --query key1 -o tsv
+}
+catch {
+    Write-Warning "Could not retrieve Azure OpenAI API key (local auth may be disabled). Using keyless auth."
+}
 
 $cuEndpoint = az cognitiveservices account show --name $env:AZ_AISERVICES_ACCOUNT_NAME --resource-group $env:AZ_RESOURCE_GROUP --query properties.endpoint -o tsv
-$cuKey = az cognitiveservices account keys list --name $env:AZ_AISERVICES_ACCOUNT_NAME --resource-group $env:AZ_RESOURCE_GROUP --query key1 -o tsv
+$foundryProjectEndpoint = "https://$($env:AZ_AISERVICES_ACCOUNT_NAME).services.ai.azure.com"
+$cuKey = ""
+try {
+    $cuKey = az cognitiveservices account keys list --name $env:AZ_AISERVICES_ACCOUNT_NAME --resource-group $env:AZ_RESOURCE_GROUP --query key1 -o tsv
+}
+catch {
+    Write-Warning "Could not retrieve Azure AI Services key (local auth may be disabled). Using keyless auth."
+}
 
 $searchEndpoint = "https://$($env:AZ_SEARCH_SERVICE_NAME).search.windows.net"
-$searchKey = az search admin-key show --service-name $env:AZ_SEARCH_SERVICE_NAME --resource-group $env:AZ_RESOURCE_GROUP --query primaryKey -o tsv
+$searchKey = ""
+try {
+    $searchKey = az search admin-key show --service-name $env:AZ_SEARCH_SERVICE_NAME --resource-group $env:AZ_RESOURCE_GROUP --query primaryKey -o tsv
+}
+catch {
+    Write-Warning "Could not retrieve AI Search admin key (local auth may be disabled). Using keyless auth."
+}
 
-$storageConnectionString = az storage account show-connection-string --name $env:AZ_STORAGE_ACCOUNT_NAME --resource-group $env:AZ_RESOURCE_GROUP --query connectionString -o tsv
+$storageConnectionString = ""
+try {
+    $allowSharedKeyAccess = az storage account show --name $env:AZ_STORAGE_ACCOUNT_NAME --resource-group $env:AZ_RESOURCE_GROUP --query allowSharedKeyAccess -o tsv
+    if ($allowSharedKeyAccess -ne "false") {
+        $storageConnectionString = az storage account show-connection-string --name $env:AZ_STORAGE_ACCOUNT_NAME --resource-group $env:AZ_RESOURCE_GROUP --query connectionString -o tsv
+    }
+    else {
+        Write-Warning "Shared key auth is disabled on the storage account. Using DefaultAzureCredential for Blob access."
+    }
+}
+catch {
+    Write-Warning "Could not retrieve storage connection string. Using DefaultAzureCredential for Blob access."
+}
 
 $envFilePath = Join-Path $repoRoot ".env"
 
@@ -28,10 +59,10 @@ $envFilePath = Join-Path $repoRoot ".env"
 AZURE_SUBSCRIPTION_ID=$subscriptionId
 AZURE_RESOURCE_GROUP=$($env:AZ_RESOURCE_GROUP)
 
-AZURE_AI_PROJECT_NAME=$($env:AZ_AISERVICES_ACCOUNT_NAME)
-AZURE_AI_PROJECT_ENDPOINT=$cuEndpoint
+AZURE_AI_PROJECT_NAME=$($env:AZ_FOUNDRY_PROJECT_NAME)
+AZURE_AI_PROJECT_ENDPOINT=$foundryProjectEndpoint
 
-AZURE_OPENAI_ENDPOINT=$openaiEndpoint
+AZURE_OPENAI_ENDPOINT=$cuEndpoint
 AZURE_OPENAI_DEPLOYMENT=$($env:AZ_OPENAI_DEPLOYMENT_NAME)
 AZURE_OPENAI_API_VERSION=2024-12-01-preview
 
@@ -41,8 +72,12 @@ AZURE_SEARCH_INDEX_NAME=doc-review-index
 AZURE_STORAGE_ACCOUNT_NAME=$($env:AZ_STORAGE_ACCOUNT_NAME)
 AZURE_STORAGE_CONTAINER_NAME=$($env:AZ_STORAGE_CONTAINER_NAME)
 
-AZURE_CU_ENDPOINT=$cuEndpoint
-AZURE_CU_ANALYZER_ID=doc-review-analyzer
+AZURE_CU_ENDPOINT=$foundryProjectEndpoint
+AZURE_CU_ANALYZER_ID=$($env:AZ_CU_ANALYZER_ID)
+AZURE_CU_LLM_DEPLOYMENT=$($env:AZ_CU_LLM_DEPLOYMENT_NAME)
+AZURE_CU_EMBEDDING_DEPLOYMENT=$($env:AZ_CU_EMBEDDING_DEPLOYMENT_NAME)
+AZURE_CU_LLM_MODEL=$($env:AZ_CU_LLM_MODEL_NAME)
+AZURE_CU_EMBEDDING_MODEL=$($env:AZ_CU_EMBEDDING_MODEL_NAME)
 
 # API key fallback values for local workshop reliability.
 AZURE_OPENAI_API_KEY=$openaiKey
@@ -57,13 +92,24 @@ APP_VERSION=$($env:APP_VERSION)
 Write-Host "Generated $envFilePath"
 
 # Optional bootstrap: create search index and content understanding analyzer.
-$pythonExists = Get-Command python -ErrorAction SilentlyContinue
-if ($pythonExists) {
+$pythonCommand = $null
+$venvPython = Join-Path $repoRoot ".venv/Scripts/python.exe"
+if (Test-Path $venvPython) {
+    $pythonCommand = $venvPython
+}
+else {
+    $pythonExists = Get-Command python -ErrorAction SilentlyContinue
+    if ($pythonExists) {
+        $pythonCommand = $pythonExists.Source
+    }
+}
+
+if ($pythonCommand) {
     Write-Host "Running optional bootstrap scripts..."
     Push-Location $repoRoot
     try {
-        python scripts/create_search_index.py
-        python scripts/create_cu_analyzer.py
+        & $pythonCommand scripts/create_search_index.py
+        & $pythonCommand scripts/create_cu_analyzer.py
     }
     catch {
         Write-Warning "One or more bootstrap scripts failed."

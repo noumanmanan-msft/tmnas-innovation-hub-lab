@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import textwrap
 import uuid
+import re
 
 from azure.search.documents import SearchClient
 from azure.search.documents.indexes import SearchIndexClient
@@ -75,7 +76,7 @@ def create_index_if_not_exists() -> bool:
     settings = get_settings()
     index_client = get_index_client()
 
-    existing = [idx.name for idx in index_client.list_index_names()]
+    existing = list(index_client.list_index_names())
     if settings.azure_search_index_name in existing:
         return False
 
@@ -149,6 +150,12 @@ def chunk_text(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_OVE
     return chunks
 
 
+def _build_search_doc_key(doc_id: str, chunk_index: int) -> str:
+    # Azure AI Search keys only allow letters, digits, _, -, =
+    normalized = re.sub(r"[^A-Za-z0-9_\-=]", "-", doc_id)
+    return f"{normalized}_{chunk_index}"
+
+
 async def index_document(doc_id: str, filename: str, raw_content: str) -> int:
     """
     Chunk raw_content and upload all chunks to the search index.
@@ -160,7 +167,7 @@ async def index_document(doc_id: str, filename: str, raw_content: str) -> int:
 
     documents = [
         {
-            "id": f"{doc_id}_{i}",
+            "id": _build_search_doc_key(doc_id, i),
             "doc_id": doc_id,
             "filename": filename,
             "chunk": chunk,

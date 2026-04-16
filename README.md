@@ -158,7 +158,7 @@ AZURE_STORAGE_CONTAINER_NAME=  # e.g. documents
 
 # ── Azure Content Understanding ───────────────────────────────
 AZURE_CU_ENDPOINT=             # e.g. https://<name>.cognitiveservices.azure.com
-AZURE_CU_ANALYZER_ID=          # e.g. doc-review-analyzer (create in AI Foundry)
+AZURE_CU_ANALYZER_ID=          # e.g. docreviewanalyzer (create in AI Foundry)
 
 # ── Optional: API Key Fallback ────────────────────────────────
 # Only set these if DefaultAzureCredential does not work in your environment.
