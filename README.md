@@ -78,6 +78,60 @@ Visit **http://localhost:8000** in your browser.
 
 ---
 
+## 🤖 Automated Azure Provisioning (No Portal Required)
+
+If you want customers to create all required lab resources from CLI only, use the new numbered scripts.
+
+### What these scripts do
+
+1. Log in to Azure via `az` CLI.
+2. Select the subscription (optional, if provided).
+3. Create the resource group if it does not exist.
+4. Create required resources for this lab:
+    - Azure Storage account + `documents` blob container
+    - Azure AI Search service
+    - Azure OpenAI account + model deployment
+    - Azure AI Services account for Content Understanding endpoint/key
+5. Generate a ready-to-run `.env` file from created resources.
+6. Optionally run bootstrap scripts to create the Search index and Content Understanding analyzer.
+
+### Bash (Linux/macOS)
+
+Update variables first:
+
+- `scripts/bash/00-variables.sh`
+
+Run in order:
+
+```bash
+bash scripts/bash/01-login.sh
+bash scripts/bash/02-create-resource-group.sh
+bash scripts/bash/03-create-resources.sh
+bash scripts/bash/04-generate-env-and-bootstrap.sh
+```
+
+### PowerShell (Windows / PowerShell Core)
+
+Update variables first:
+
+- `scripts/powershell/00-variables.ps1`
+
+Run in order:
+
+```powershell
+pwsh ./scripts/powershell/01-login.ps1
+pwsh ./scripts/powershell/02-create-resource-group.ps1
+pwsh ./scripts/powershell/03-create-resources.ps1
+pwsh ./scripts/powershell/04-generate-env-and-bootstrap.ps1
+```
+
+> Notes:
+> - Keep the same suffix/name values across all steps.
+> - OpenAI deployment can fail if model quota or region availability is insufficient; adjust model/region in the `00-variables` file and rerun step 03.
+> - After provisioning finishes, run the app with `uvicorn backend.main:app --reload --port 8000`.
+
+---
+
 ## 🔧 Configuration Reference
 
 Edit `.env` with the values from your Azure AI Foundry project:
