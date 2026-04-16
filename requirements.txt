@@ -1,0 +1,25 @@
+# ── Web Framework ─────────────────────────────────────────────
+fastapi==0.115.5
+uvicorn[standard]==0.32.1
+python-multipart==0.0.12        # file upload support
+jinja2==3.1.4                   # HTML templating
+aiofiles==24.1.0
+
+# ── Azure Identity (keyless auth) ─────────────────────────────
+azure-identity==1.19.0
+
+# ── Azure Services ────────────────────────────────────────────
+azure-storage-blob==12.23.1
+azure-ai-documentintelligence==1.0.0b4
+azure-search-documents==11.6.0b7
+openai==1.57.0                  # Azure OpenAI via openai SDK
+
+# ── Azure AI Projects (Foundry) ───────────────────────────────
+azure-ai-projects==1.0.0b4
+
+# ── Utilities ─────────────────────────────────────────────────
+python-dotenv==1.0.1
+pydantic==2.10.3
+pydantic-settings==2.6.1
+httpx==0.28.1
+tenacity==9.0.0                 # retry logic for API calls
